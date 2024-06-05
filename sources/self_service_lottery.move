@@ -8,20 +8,19 @@ module self_service_lottery::self_service_lottery {
     use sui::hmac::hmac_sha3_256;
     use std::string::{Self, String};
     use sui::table::{Self, Table};
+    use sui::object::{Self, ID, UID};
 
     // ====== error code ======
-
     const ENotIncome: u64 = 0;
     const ENotCorrectLotteryID: u64 = 1;
     const EHasBeenEnded: u64 = 2;
     const ENotEnded: u64 = 3;
-    const ENotFedeem: u64 = 4;
+    const ENotRedeem: u64 = 4;
     const ENotBonus: u64 = 5;
     const ENotEnoughCoin: u64 = 6;
     const ENotOpenLottery: u64 = 7;
 
     // ====== struct ======
-
     public struct SELF_SERVICE_LOTTERY has drop {}
 
     public struct LotterySystem has key {
@@ -40,7 +39,7 @@ module self_service_lottery::self_service_lottery {
         announcement: bool,
         winner_code: vector<u8>,
         income: Balance<SUI>,
-        creater: address,
+        creator: address,
     }
 
     public struct LotteryStub has key {
@@ -68,7 +67,6 @@ module self_service_lottery::self_service_lottery {
     }
 
     // ====== function ======
-
     fun init(otw: SELF_SERVICE_LOTTERY, ctx: &mut TxContext) {
         // generate Publisher and transfer it
         package::claim_and_keep(otw, ctx);
@@ -107,9 +105,9 @@ module self_service_lottery::self_service_lottery {
             end_epoch: ctx.epoch() + continuous_epoch,
             bonus: bonus.into_balance(),
             announcement: false,
-            winner_code: vector<u8>[],
+            winner_code: vector<u8>::empty(),
             income: balance::zero(),
-            creater: ctx.sender(),
+            creator: ctx.sender(),
         };
         // emit event
         event::emit(NewLotteryEvent {
@@ -135,7 +133,7 @@ module self_service_lottery::self_service_lottery {
             announcement: _,
             mut winner_code,
             mut income,
-            creater,
+            creator,
         } = lottery;
 
         // destroy winner_code
@@ -152,16 +150,16 @@ module self_service_lottery::self_service_lottery {
         };
 
         // transfer income
-        transfer::public_transfer(coin::from_balance(income, ctx), creater);
+        transfer::public_transfer(coin::from_balance(income, ctx), creator);
     }
 
-    entry fun fedeem_bonus(lottery_system: &mut LotterySystem, lottery_id: ID, ctx: &mut TxContext) {
+    entry fun redeem_bonus(lottery_system: &mut LotterySystem, lottery_id: ID, ctx: &mut TxContext) {
         // check lottery_id
         assert!(lottery_system.lotteries.contains(lottery_id), ENotCorrectLotteryID);
         // get Lottery
         let mut lottery = lottery_system.lotteries.remove(lottery_id);
         // check sales status and epoch
-        assert!(lottery.total_amount == lottery.remaining_amount || ctx.epoch() > lottery.end_epoch + 15, ENotFedeem);
+        assert!(lottery.total_amount == lottery.remaining_amount || ctx.epoch() > lottery.end_epoch + 15, ENotRedeem);
         calculate_fee(lottery_system, &mut lottery.income);
         destroy_lottery(lottery, ctx);
     }
@@ -197,8 +195,8 @@ module self_service_lottery::self_service_lottery {
         assert!(ctx.epoch() > lottery.end_epoch || lottery.remaining_amount == 0, ENotEnded);
         // sell nothing
         if (lottery.total_amount == lottery.remaining_amount) {
-            fedeem_bonus(lottery_system, lottery_id, ctx);
-            return
+            redeem_bonus(lottery_system, lottery_id, ctx);
+            return;
         };
         // random the winner
         lottery.announcement = true;
@@ -206,8 +204,8 @@ module self_service_lottery::self_service_lottery {
         lottery.winner_code = hmac_sha3_256(&bcs::to_bytes(&index), &object::id_to_bytes(&lottery_id));
         // emit event
         event::emit(WinEvent {
-            lottery_name: lottery.lottery_name,
-            winner_code: lottery.winner_code,
+            lottery_name: lottery.lottery_name.clone(),
+            winner_code: lottery.winner_code.clone(),
         });
     }
 
@@ -224,10 +222,10 @@ module self_service_lottery::self_service_lottery {
         if (ctx.epoch() > lottery.end_epoch || lottery.remaining_amount == 0) {
             announcement(lottery_system, lottery_id, ctx);
             event::emit(EndEvent {
-                hint: string::utf8(b"The lottery ticket you purchased has ended!")
+                hint: string::utf8(b"The lottery ticket you purchased has ended!"),
             });
             transfer::public_transfer(sui, ctx.sender());
-            return
+            return;
         };
         // deal with sui
         if (sui.value() == lottery.price) {
@@ -271,19 +269,19 @@ module self_service_lottery::self_service_lottery {
         if (!lottery_system.lotteries.contains(lottery_id)) {
             destroy_lottery_stub(lottery_stub);
             event::emit(EndEvent {
-                hint: string::utf8(b"You have not won a prize or the redemption period has expired!")
+                hint: string::utf8(b"You have not won a prize or the redemption period has expired!"),
             });
-            return
+            return;
         };
         // get lottery
         let lottery = &mut lottery_system.lotteries[lottery_id];
         if (!lottery.announcement && (ctx.epoch() > lottery.end_epoch || lottery.remaining_amount == 0)) {
             announcement(lottery_system, lottery_id, ctx);
             event::emit(EndEvent {
-                hint: string::utf8(b"The lottery has just been drawn, please check and redeem again!")
+                hint: string::utf8(b"The lottery has just been drawn, please check and redeem again!"),
             });
             transfer::transfer(lottery_stub, ctx.sender());
-            return
+            return;
         };
         // check announcement
         assert!(lottery.announcement, ENotOpenLottery);
@@ -302,7 +300,7 @@ module self_service_lottery::self_service_lottery {
         } else {
             // Loser
             event::emit(EndEvent {
-                hint: string::utf8(b"Unfortunately, the lottery you purchased did not win a prize!")
+                hint: string::utf8(b"Unfortunately, the lottery you purchased did not win a prize!"),
             });
         };
         destroy_lottery_stub(lottery_stub);
@@ -314,5 +312,39 @@ module self_service_lottery::self_service_lottery {
         if (amount > 0) {
             lottery_system.ls_income.join(income.split(amount));
         };
+    }
+
+    // Additional functionality
+
+    // Function to get details of a specific lottery
+    public fun get_lottery_details(lottery_system: &LotterySystem, lottery_id: ID): Option<Lottery> {
+        if (lottery_system.lotteries.contains(lottery_id)) {
+            return Option::some(lottery_system.lotteries.get(lottery_id));
+        }
+        Option::none()
+    }
+
+    // Function to list all lotteries
+    public fun list_all_lotteries(lottery_system: &LotterySystem): vector<Lottery> {
+        let mut lotteries = vector<Lottery>::empty();
+        let ids = lottery_system.lotteries.keys();
+        for id in ids {
+            let lottery = lottery_system.lotteries.get(id);
+            lotteries.push_back(lottery);
+        }
+        lotteries
+    }
+
+    // Function to fetch all lottery stubs of a user
+    public fun get_user_lottery_stubs(user: address, ctx: &TxContext): vector<LotteryStub> {
+        let objects = object::list(user);
+        let mut stubs = vector<LotteryStub>::empty();
+        for obj in objects {
+            if (object::type(obj) == type_of<LotteryStub>()) {
+                let stub: LotteryStub = object::read(obj);
+                stubs.push_back(stub);
+            }
+        }
+        stubs
     }
 }
