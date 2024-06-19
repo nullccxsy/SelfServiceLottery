@@ -1,14 +1,16 @@
 module self_service_lottery::self_service_lottery {
     use sui::sui::SUI;
-    use sui::balance::{Self, Balance};
-    use sui::coin::{Self, Coin};
-    use sui::package::{Self, Publisher};
+    use sui::balance::{self, Balance};
+    use sui::coin::{self, Coin};
+    use sui::package::{self, Publisher};
     use sui::event;
     use std::bcs;
     use sui::hmac::hmac_sha3_256;
-    use std::string::{Self, String};
-    use sui::table::{Self, Table};
-    use sui::object::{Self, ID, UID};
+    use std::string::{self, String};
+    use sui::table::{self, Table};
+    use sui::object::{self, ID, UID};
+    use sui::transfer;
+    use sui::context::TxContext;
 
     // ====== error code ======
     const ENotIncome: u64 = 0;
@@ -67,10 +69,8 @@ module self_service_lottery::self_service_lottery {
     }
 
     // ====== function ======
-    fun init(otw: SELF_SERVICE_LOTTERY, ctx: &mut TxContext) {
-        // generate Publisher and transfer it
-        package::claim_and_keep(otw, ctx);
-        // generate LotterySystem and share it
+    public fun init(ctx: &mut TxContext) {
+        // Generate LotterySystem and share it
         transfer::share_object(LotterySystem {
             id: object::new(ctx),
             lotteries: table::new<ID, Lottery>(ctx),
@@ -79,24 +79,24 @@ module self_service_lottery::self_service_lottery {
     }
 
     entry fun withdraw(_: &Publisher, lottery_system: &mut LotterySystem, ctx: &mut TxContext) {
-        // check coin value
+        // Check coin value
         let amount = lottery_system.ls_income.value();
         assert!(amount > 0, ENotIncome);
-        // withdraw income
+        // Withdraw income
         transfer::public_transfer(coin::from_balance(lottery_system.ls_income.split(amount), ctx), ctx.sender());
     }
 
     entry fun create_lottery(lottery_system: &mut LotterySystem, lottery_name: String, price: u64, total_amount: u64, bonus: Coin<SUI>, ctx: &mut TxContext) {
-        // default continuous 15 epoch
+        // Default continuous 15 epoch
         create_lottery_with_epoch(lottery_system, lottery_name, price, total_amount, 15, bonus, ctx);
     }
 
     entry fun create_lottery_with_epoch(lottery_system: &mut LotterySystem, lottery_name: String, price: u64, total_amount: u64, continuous_epoch: u64, bonus: Coin<SUI>, ctx: &mut TxContext) {
-        // check bonus value
+        // Check bonus value
         assert!(bonus.value() > 0, ENotBonus);
-        // generate Lottery ID
+        // Generate Lottery ID
         let lottery_id = object::id_from_address(ctx.fresh_object_address());
-        // generate Lottery
+        // Generate Lottery
         let lottery = Lottery {
             lottery_name,
             price,
@@ -109,16 +109,16 @@ module self_service_lottery::self_service_lottery {
             income: balance::zero(),
             creator: ctx.sender(),
         };
-        // emit event
+        // Emit event
         event::emit(NewLotteryEvent {
             lottery_id,
-            lottery_name,
+            lottery_name: lottery.lottery_name.clone(),
             price,
             total_amount,
             end_epoch: ctx.epoch() + continuous_epoch,
             bonus_value: lottery.bonus.value(),
         });
-        // store it
+        // Store it
         lottery_system.lotteries.add(lottery_id, lottery);
     }
 
@@ -136,29 +136,29 @@ module self_service_lottery::self_service_lottery {
             creator,
         } = lottery;
 
-        // destroy winner_code
+        // Destroy winner_code
         while (winner_code.length() > 0) {
             winner_code.pop_back();
         };
         winner_code.destroy_empty();
 
-        // destroy bonus
+        // Destroy bonus
         if (bonus.value() > 0) {
             income.join(bonus);
         } else {
             bonus.destroy_zero();
         };
 
-        // transfer income
+        // Transfer income
         transfer::public_transfer(coin::from_balance(income, ctx), creator);
     }
 
     entry fun redeem_bonus(lottery_system: &mut LotterySystem, lottery_id: ID, ctx: &mut TxContext) {
-        // check lottery_id
+        // Check lottery_id
         assert!(lottery_system.lotteries.contains(lottery_id), ENotCorrectLotteryID);
-        // get Lottery
+        // Get Lottery
         let mut lottery = lottery_system.lotteries.remove(lottery_id);
-        // check sales status and epoch
+        // Check sales status and epoch
         assert!(lottery.total_amount == lottery.remaining_amount || ctx.epoch() > lottery.end_epoch + 15, ENotRedeem);
         calculate_fee(lottery_system, &mut lottery.income);
         destroy_lottery(lottery, ctx);
@@ -167,42 +167,42 @@ module self_service_lottery::self_service_lottery {
     fun calculate(total: u64, remaining: u64, mut bytes: vector<u8>): u64 {
         let mut bytes1 = hmac_sha3_256(&bcs::to_bytes(&total), &bytes);
         bytes = hmac_sha3_256(&bcs::to_bytes(&remaining), &bytes1);
-        // destroy bytes1
+        // Destroy bytes1
         while (bytes1.length() > 0) {
             bytes1.pop_back();
         };
         bytes1.destroy_empty();
-        // calculate
+        // Calculate
         let mut index = 1;
         let d = total - remaining;
         while (bytes.length() > 0) {
             let byte = bytes.pop_back() as u64;
             index = (index * (byte % d + 1)) % d + 1;
         };
-        // destroy bytes
+        // Destroy bytes
         bytes.destroy_empty();
         index
     }
 
     entry fun announcement(lottery_system: &mut LotterySystem, lottery_id: ID, ctx: &mut TxContext) {
-        // check lottery_id
+        // Check lottery_id
         assert!(lottery_system.lotteries.contains(lottery_id), ENotCorrectLotteryID);
-        // get Lottery
+        // Get Lottery
         let lottery = &mut lottery_system.lotteries[lottery_id];
-        // check announcement
+        // Check announcement
         assert!(!lottery.announcement, EHasBeenEnded);
-        // check epoch
+        // Check epoch
         assert!(ctx.epoch() > lottery.end_epoch || lottery.remaining_amount == 0, ENotEnded);
-        // sell nothing
+        // Sell nothing
         if (lottery.total_amount == lottery.remaining_amount) {
             redeem_bonus(lottery_system, lottery_id, ctx);
             return;
         };
-        // random the winner
+        // Random the winner
         lottery.announcement = true;
         let index = calculate(lottery.total_amount, lottery.remaining_amount, ctx.fresh_object_address().to_bytes());
         lottery.winner_code = hmac_sha3_256(&bcs::to_bytes(&index), &object::id_to_bytes(&lottery_id));
-        // emit event
+        // Emit event
         event::emit(WinEvent {
             lottery_name: lottery.lottery_name.clone(),
             winner_code: lottery.winner_code.clone(),
@@ -210,15 +210,15 @@ module self_service_lottery::self_service_lottery {
     }
 
     entry fun buy_lottery(lottery_system: &mut LotterySystem, lottery_id: ID, mut sui: Coin<SUI>, ctx: &mut TxContext) {
-        // check lottery_id
+        // Check lottery_id
         assert!(lottery_system.lotteries.contains(lottery_id), ENotCorrectLotteryID);
-        // get Lottery
+        // Get Lottery
         let lottery = &mut lottery_system.lotteries[lottery_id];
-        // check announcement
+        // Check announcement
         assert!(!lottery.announcement, EHasBeenEnded);
-        // check sui value
+        // Check sui value
         assert!(sui.value() >= lottery.price, ENotEnoughCoin);
-        // check epoch
+        // Check epoch
         if (ctx.epoch() > lottery.end_epoch || lottery.remaining_amount == 0) {
             announcement(lottery_system, lottery_id, ctx);
             event::emit(EndEvent {
@@ -227,24 +227,24 @@ module self_service_lottery::self_service_lottery {
             transfer::public_transfer(sui, ctx.sender());
             return;
         };
-        // deal with sui
+        // Deal with sui
         if (sui.value() == lottery.price) {
             lottery.income.join(sui.into_balance());
         } else {
             lottery.income.join(sui.split(lottery.price, ctx).into_balance());
             transfer::public_transfer(sui, ctx.sender());
         };
-        // update remaining amount and generate code
+        // Update remaining amount and generate code
         lottery.remaining_amount = lottery.remaining_amount - 1;
         let index = lottery.total_amount - lottery.remaining_amount;
         let code = hmac_sha3_256(&bcs::to_bytes(&index), &object::id_to_bytes(&lottery_id));
-        // generate and transfer LotteryStub
+        // Generate and transfer LotteryStub
         transfer::transfer(LotteryStub {
             id: object::new(ctx),
             lottery_id,
             code,
         }, ctx.sender());
-        // check sell out
+        // Check sell out
         if (lottery.remaining_amount == 0) {
             announcement(lottery_system, lottery_id, ctx);
         };
@@ -264,7 +264,7 @@ module self_service_lottery::self_service_lottery {
     }
 
     entry fun redeem_lottery(lottery_system: &mut LotterySystem, lottery_stub: LotteryStub, ctx: &mut TxContext) {
-        // get lottery id
+        // Get lottery id
         let lottery_id = lottery_stub.lottery_id;
         if (!lottery_system.lotteries.contains(lottery_id)) {
             destroy_lottery_stub(lottery_stub);
@@ -273,7 +273,7 @@ module self_service_lottery::self_service_lottery {
             });
             return;
         };
-        // get lottery
+        // Get lottery
         let lottery = &mut lottery_system.lotteries[lottery_id];
         if (!lottery.announcement && (ctx.epoch() > lottery.end_epoch || lottery.remaining_amount == 0)) {
             announcement(lottery_system, lottery_id, ctx);
@@ -283,19 +283,15 @@ module self_service_lottery::self_service_lottery {
             transfer::transfer(lottery_stub, ctx.sender());
             return;
         };
-        // check announcement
+        // Check announcement
         assert!(lottery.announcement, ENotOpenLottery);
-        // check winner code
+        // Check winner code
         if (lottery.winner_code == lottery_stub.code) {
             // Winner
             let amount = lottery.bonus.value();
             transfer::public_transfer(coin::from_balance(lottery.bonus.split(amount), ctx), ctx.sender());
-            // calculate_fee(lottery_system, &mut lottery.income);
-            // calc fee amount(1%)
-            let amount = lottery.income.value() / 100;
-            if (amount > 0) {
-                lottery_system.ls_income.join(lottery.income.split(amount));
-            };
+            // Calculate fee amount (1%)
+            calculate_fee(lottery_system, &mut lottery.income);
             destroy_lottery(lottery_system.lotteries.remove(lottery_id), ctx);
         } else {
             // Loser
@@ -307,7 +303,7 @@ module self_service_lottery::self_service_lottery {
     }
 
     fun calculate_fee(lottery_system: &mut LotterySystem, income: &mut Balance<SUI>) {
-        // calc fee amount(1%)
+        // Calculate fee amount (1%)
         let amount = income.value() / 100;
         if (amount > 0) {
             lottery_system.ls_income.join(income.split(amount));
@@ -346,5 +342,17 @@ module self_service_lottery::self_service_lottery {
             }
         }
         stubs
+    }
+
+    // Function to extend the duration of a lottery
+    entry fun extend_lottery(lottery_system: &mut LotterySystem, lottery_id: ID, additional_epochs: u64, ctx: &mut TxContext) {
+        // Check lottery_id
+        assert!(lottery_system.lotteries.contains(lottery_id), ENotCorrectLotteryID);
+        // Get Lottery
+        let lottery = &mut lottery_system.lotteries[lottery_id];
+        // Check if the lottery has ended
+        assert!(!lottery.announcement, EHasBeenEnded);
+        // Extend the lottery duration
+        lottery.end_epoch = lottery.end_epoch + additional_epochs;
     }
 }
